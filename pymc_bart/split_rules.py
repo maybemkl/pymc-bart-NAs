@@ -189,7 +189,6 @@ class MissingnessAwareSplitRule(SplitRule):
         return split_value, missing_goes_left
 
     @staticmethod
-    @njit
     def divide(available_splitting_values, split_info):
         """
         [NA-handling] Divide data based on split value and missing value routing.
@@ -202,6 +201,11 @@ class MissingnessAwareSplitRule(SplitRule):
         - Boolean array indicating which values go to the left child
         """
         split_value, missing_goes_left = split_info
+        
+        # Handle case where split_value is None (no valid split found)
+        if split_value is None:
+            # If no valid split, all values go to the left child
+            return np.ones_like(available_splitting_values, dtype=bool)
         
         # Handle non-missing values
         result = available_splitting_values <= split_value
@@ -272,6 +276,11 @@ class MissingnessAwareCategoricalSplitRule(SplitRule):
         - Boolean array indicating which values go to the left child
         """
         category_subset, missing_goes_left = split_info
+        
+        # Handle case where category_subset is None (no valid split found)
+        if category_subset is None:
+            # If no valid split, all values go to the left child
+            return np.ones_like(available_splitting_values, dtype=bool)
         
         # Handle non-missing values
         result = np.isin(available_splitting_values, category_subset)
