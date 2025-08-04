@@ -32,9 +32,11 @@ class Node:
     idx_data_points : Optional[npt.NDArray[np.int_]]
     idx_split_variable : int
     linear_params: Optional[list[float]] = None
+    missing_goes_left: Optional[bool] = None
+        [NA-handling] For missingness-aware splits, indicates whether missing values go to left child
     """
 
-    __slots__ = "value", "nvalue", "idx_split_variable", "idx_data_points", "linear_params"
+    __slots__ = "value", "nvalue", "idx_split_variable", "idx_data_points", "linear_params", "missing_goes_left"
 
     def __init__(
         self,
@@ -43,12 +45,15 @@ class Node:
         idx_data_points: Optional[npt.NDArray[np.int_]] = None,
         idx_split_variable: int = -1,
         linear_params: Optional[list[npt.NDArray]] = None,
+        missing_goes_left: Optional[bool] = None,
     ) -> None:
         self.value = value
         self.nvalue = nvalue
         self.idx_data_points = idx_data_points
         self.idx_split_variable = idx_split_variable
         self.linear_params = linear_params
+        # [NA-handling] Store missing value routing decision for missingness-aware splits
+        self.missing_goes_left = missing_goes_left
 
     @classmethod
     def new_leaf_node(
@@ -58,6 +63,7 @@ class Node:
         idx_data_points: Optional[npt.NDArray[np.int_]] = None,
         idx_split_variable: int = -1,
         linear_params: Optional[list[npt.NDArray]] = None,
+        missing_goes_left: Optional[bool] = None,
     ) -> "Node":
         return cls(
             value=value,
@@ -65,6 +71,7 @@ class Node:
             idx_data_points=idx_data_points,
             idx_split_variable=idx_split_variable,
             linear_params=linear_params,
+            missing_goes_left=missing_goes_left,
         )
 
     def is_split_node(self) -> bool:
@@ -72,6 +79,10 @@ class Node:
 
     def is_leaf_node(self) -> bool:
         return not self.is_split_node()
+
+    def is_missingness_aware_split(self) -> bool:
+        """[NA-handling] Check if this node uses missingness-aware splitting."""
+        return self.missing_goes_left is not None
 
 
 def get_idx_left_child(index) -> int:
@@ -167,6 +178,7 @@ class Tree:
                 idx_data_points=v.idx_data_points,
                 idx_split_variable=v.idx_split_variable,
                 linear_params=v.linear_params,
+                missing_goes_left=v.missing_goes_left,  # [NA-handling] Copy missingness information
             )
             for k, v in self.tree_structure.items()
         }
@@ -192,10 +204,13 @@ class Tree:
         selected_predictor: int,
         split_value: npt.NDArray,
         index_leaf_node: int,
+        missing_goes_left: Optional[bool] = None,  # [NA-handling] Missing value routing decision
     ) -> None:
         current_node.value = split_value
         current_node.idx_split_variable = selected_predictor
         current_node.idx_data_points = None
+        # [NA-handling] Store missing value routing decision for missingness-aware splits
+        current_node.missing_goes_left = missing_goes_left
         if self.idx_leaf_nodes is not None:
             self.idx_leaf_nodes.remove(index_leaf_node)
 
@@ -207,6 +222,7 @@ class Tree:
                 idx_data_points=None,
                 idx_split_variable=v.idx_split_variable,
                 linear_params=v.linear_params,
+                missing_goes_left=v.missing_goes_left,  # [NA-handling] Preserve missingness information
             )
             for k, v in self.tree_structure.items()
         }
@@ -326,11 +342,39 @@ class Tree:
                         )
                     )
                 else:
-                    to_left = (
-                        self.split_rules[idx_split_variable]
-                        .divide(X[..., idx_split_variable], node.value)
-                        .astype("float")
-                    )
+                    # [NA-handling] Handle missingness-aware splits differently
+                    if node.is_missingness_aware_split():
+                        # For missingness-aware splits, we need to handle missing values explicitly
+                        split_value = node.value
+                        missing_goes_left = node.missing_goes_left
+                        
+                        # Handle non-missing values
+                        non_missing_mask = ~np.isnan(X[..., idx_split_variable])
+                        to_left = np.zeros_like(X[..., idx_split_variable], dtype=bool)
+                        
+                        # Apply split rule to non-missing values
+                        if non_missing_mask.any():
+                            non_missing_values = X[..., idx_split_variable][non_missing_mask]
+                            non_missing_to_left = (
+                                self.split_rules[idx_split_variable]
+                                .divide(non_missing_values, split_value)
+                                .astype("float")
+                            )
+                            to_left[non_missing_mask] = non_missing_to_left
+                        
+                        # Handle missing values according to the stored routing decision
+                        missing_mask = np.isnan(X[..., idx_split_variable])
+                        to_left[missing_mask] = missing_goes_left
+                        
+                        to_left = to_left.astype("float")
+                    else:
+                        # Standard split handling for non-missingness-aware splits
+                        to_left = (
+                            self.split_rules[idx_split_variable]
+                            .divide(X[..., idx_split_variable], node.value)
+                            .astype("float")
+                        )
+                    
                     stack.append((left_node_index, weights * to_left, idx_split_variable))
                     stack.append((right_node_index, weights * (1 - to_left), idx_split_variable))
 

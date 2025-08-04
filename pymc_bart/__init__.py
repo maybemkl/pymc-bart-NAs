@@ -15,7 +15,13 @@ import pymc as pm
 
 from pymc_bart.bart import BART
 from pymc_bart.pgbart import PGBART
-from pymc_bart.split_rules import ContinuousSplitRule, OneHotSplitRule, SubsetSplitRule
+from pymc_bart.split_rules import (
+    ContinuousSplitRule, 
+    OneHotSplitRule, 
+    SubsetSplitRule,
+    MissingnessAwareSplitRule,  # [NA-handling] New missingness-aware split rule
+    MissingnessAwareCategoricalSplitRule,  # [NA-handling] New missingness-aware categorical split rule
+)
 from pymc_bart.utils import (
     compute_variable_importance,
     get_variable_inclusion,
@@ -25,6 +31,12 @@ from pymc_bart.utils import (
     plot_scatter_submodels,
     plot_variable_importance,
     plot_variable_inclusion,
+    # [NA-handling] Missingness handling utility functions
+    analyze_missingness_patterns,
+    plot_missingness_patterns,
+    get_missingness_importance,
+    create_missingness_aware_split_rules,
+    validate_missingness_handling,
 )
 
 __all__ = [
@@ -33,6 +45,8 @@ __all__ = [
     "ContinuousSplitRule",
     "OneHotSplitRule",
     "SubsetSplitRule",
+    "MissingnessAwareSplitRule",  # [NA-handling] New missingness-aware split rule
+    "MissingnessAwareCategoricalSplitRule",  # [NA-handling] New missingness-aware categorical split rule
     "compute_variable_importance",
     "get_variable_inclusion",
     "plot_convergence",
@@ -41,6 +55,12 @@ __all__ = [
     "plot_scatter_submodels",
     "plot_variable_importance",
     "plot_variable_inclusion",
+    # [NA-handling] Missingness handling utility functions
+    "analyze_missingness_patterns",
+    "plot_missingness_patterns",
+    "get_missingness_importance",
+    "create_missingness_aware_split_rules",
+    "validate_missingness_handling",
 ]
 __version__ = "0.10.0"
 

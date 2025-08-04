@@ -29,7 +29,11 @@ from pytensor import function as pytensor_function
 from pytensor.tensor.variable import Variable
 
 from pymc_bart.bart import BARTRV
-from pymc_bart.split_rules import ContinuousSplitRule
+from pymc_bart.split_rules import (
+    ContinuousSplitRule,
+    MissingnessAwareSplitRule,
+    MissingnessAwareCategoricalSplitRule,
+)
 from pymc_bart.tree import (
     Node,
     Tree,
@@ -527,18 +531,29 @@ def grow_tree(
 
     index_selected_predictor = ssv.rvs()
     selected_predictor = available_predictors[index_selected_predictor]
-    idx_data_points, available_splitting_values = filter_missing_values(
-        X[idx_data_points, selected_predictor], idx_data_points, missing_data
-    )
-
+    
+    # [NA-handling] Get all splitting values including missing values for missingness-aware splits
+    available_splitting_values = X[idx_data_points, selected_predictor]
+    
     split_rule = tree.split_rules[selected_predictor]
 
-    split_value = split_rule.get_split_value(available_splitting_values)
+    # [NA-handling] Use the enhanced split rule that can handle missing values
+    split_info = split_rule.get_split_value(available_splitting_values)
 
-    if split_value is None:
+    if split_info is None:
         return None
 
-    to_left = split_rule.divide(available_splitting_values, split_value)
+    # [NA-handling] Handle different return types from split rules
+    if isinstance(split_info, tuple):
+        # Missingness-aware split rules return (split_value, missing_goes_left)
+        split_value, missing_goes_left = split_info
+    else:
+        # Standard split rules return just the split value
+        split_value = split_info
+        missing_goes_left = None
+
+    # [NA-handling] Apply the split rule to get the division
+    to_left = split_rule.divide(available_splitting_values, split_info)
     new_idx_data_points = idx_data_points[to_left], idx_data_points[~to_left]
 
     current_node_children = (
@@ -568,16 +583,63 @@ def grow_tree(
         )
         tree.set_node(current_node_children[idx], new_node)
 
-    tree.grow_leaf_node(current_node, selected_predictor, split_value, index_leaf_node)
+    # [NA-handling] Pass missingness information to grow_leaf_node
+    tree.grow_leaf_node(current_node, selected_predictor, split_value, index_leaf_node, missing_goes_left)
     return current_node_children
 
 
 def filter_missing_values(available_splitting_values, idx_data_points, missing_data):
+    """
+    [NA-handling] DEPRECATED: This function is kept for backward compatibility but is no longer used
+    in the main tree growth logic. The new missingness-aware split rules handle missing values
+    directly without filtering them out.
+    
+    For standard split rules that don't handle missing values, this function can still be used
+    to filter out missing values before applying the split.
+    """
     if missing_data:
         mask = ~np.isnan(available_splitting_values)
         idx_data_points = idx_data_points[mask]
         available_splitting_values = available_splitting_values[mask]
     return idx_data_points, available_splitting_values
+
+
+def apply_missingness_aware_split(
+    available_splitting_values, 
+    idx_data_points, 
+    split_rule, 
+    split_info
+):
+    """
+    [NA-handling] NEW: Apply missingness-aware split to data points.
+    
+    This function handles the application of split rules that can work with missing values,
+    ensuring that missing values are properly routed according to the split decision.
+    
+    Parameters:
+    -----------
+    available_splitting_values : npt.NDArray
+        Array of values to split on (may contain NaN values)
+    idx_data_points : npt.NDArray
+        Array of data point indices
+    split_rule : SplitRule
+        The split rule to apply
+    split_info : Union[float, tuple]
+        Split information (split value or tuple with missing value routing)
+    
+    Returns:
+    --------
+    tuple : (left_indices, right_indices)
+        Arrays of indices for left and right children
+    """
+    # Apply the split rule to get the division
+    to_left = split_rule.divide(available_splitting_values, split_info)
+    
+    # Split the data point indices accordingly
+    left_indices = idx_data_points[to_left]
+    right_indices = idx_data_points[~to_left]
+    
+    return left_indices, right_indices
 
 
 def draw_leaf_value(

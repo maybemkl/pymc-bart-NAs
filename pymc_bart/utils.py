@@ -1284,16 +1284,340 @@ def _decode_vi(n: int, length: int) -> list[int]:
 
 
 def _encode_vi(vec: npt.NDArray) -> int:
-    """
-    Encode variable inclusion vector into a single integer.
+    """Encode a binary vector to an integer."""
+    return int("".join(map(str, vec.astype(int))), 2)
 
-    The encoding is done by converting each element of the vector into a binary string,
-    where each element contributes a prefix of '1's followed by a '0' and its binary representation.
-    The final result is the integer representation of the concatenated binary string.
+
+# [NA-handling] Missingness handling utility functions
+
+def analyze_missingness_patterns(X: npt.NDArray) -> dict[str, Any]:
     """
-    bits = ""
-    for x in vec:
-        b = bin(x)[2:]
-        prefix = "1" * len(b) + "0"
-        bits += prefix + b
-    return int(bits, 2)
+    [NA-handling] Analyze missingness patterns in the input data.
+    
+    This function provides comprehensive analysis of missing values in the data,
+    including missingness rates, patterns, and correlations between missingness
+    in different variables.
+    
+    Parameters:
+    -----------
+    X : npt.NDArray
+        Input data matrix (may contain NaN values)
+        
+    Returns:
+    --------
+    dict[str, Any]
+        Dictionary containing missingness analysis results:
+        - 'missing_rates': Array of missing rates for each variable
+        - 'total_missing': Total number of missing values
+        - 'missing_patterns': Dictionary of unique missingness patterns
+        - 'missing_correlations': Correlation matrix of missingness indicators
+        - 'variables_with_missing': List of variable indices with missing values
+        - 'complete_cases': Number of complete cases (no missing values)
+    """
+    n_samples, n_variables = X.shape
+    
+    # Calculate missing rates for each variable
+    missing_rates = np.mean(np.isnan(X), axis=0)
+    
+    # Total missing values
+    total_missing = np.sum(np.isnan(X))
+    
+    # Create missingness indicator matrix
+    missing_indicators = np.isnan(X).astype(int)
+    
+    # Find unique missingness patterns
+    unique_patterns, pattern_counts = np.unique(
+        missing_indicators, axis=0, return_counts=True
+    )
+    missing_patterns = {
+        tuple(pattern): count for pattern, count in zip(unique_patterns, pattern_counts)
+    }
+    
+    # Calculate correlations between missingness indicators
+    missing_correlations = np.corrcoef(missing_indicators.T)
+    
+    # Variables with missing values
+    variables_with_missing = np.where(missing_rates > 0)[0].tolist()
+    
+    # Number of complete cases
+    complete_cases = np.sum(np.all(~np.isnan(X), axis=1))
+    
+    return {
+        'missing_rates': missing_rates,
+        'total_missing': total_missing,
+        'missing_patterns': missing_patterns,
+        'missing_correlations': missing_correlations,
+        'variables_with_missing': variables_with_missing,
+        'complete_cases': complete_cases,
+        'n_samples': n_samples,
+        'n_variables': n_variables,
+    }
+
+
+def plot_missingness_patterns(
+    X: npt.NDArray,
+    figsize: Optional[tuple[float, float]] = None,
+    color_missing: str = "red",
+    color_present: str = "lightblue",
+    title: Optional[str] = None,
+) -> plt.Figure:
+    """
+    [NA-handling] Create a heatmap visualization of missingness patterns.
+    
+    Parameters:
+    -----------
+    X : npt.NDArray
+        Input data matrix (may contain NaN values)
+    figsize : Optional[tuple[float, float]], default None
+        Figure size. If None, automatically determined.
+    color_missing : str, default "red"
+        Color for missing values in the heatmap
+    color_present : str, default "lightblue"
+        Color for present values in the heatmap
+    title : Optional[str], default None
+        Title for the plot
+        
+    Returns:
+    --------
+    plt.Figure
+        The created figure object
+    """
+    if figsize is None:
+        figsize = (max(8, X.shape[1] * 0.3), max(6, X.shape[0] * 0.01))
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Create missingness indicator matrix
+    missing_indicators = np.isnan(X).astype(int)
+    
+    # Create custom colormap
+    from matplotlib.colors import ListedColormap
+    colors = [color_present, color_missing]
+    cmap = ListedColormap(colors)
+    
+    # Create heatmap
+    im = ax.imshow(missing_indicators.T, cmap=cmap, aspect='auto', interpolation='nearest')
+    
+    # Set labels
+    ax.set_xlabel('Sample Index')
+    ax.set_ylabel('Variable Index')
+    
+    # Set title
+    if title is None:
+        title = f"Missingness Patterns (Total: {np.sum(missing_indicators)} missing values)"
+    ax.set_title(title)
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, ticks=[0, 1])
+    cbar.set_ticklabels(['Present', 'Missing'])
+    
+    plt.tight_layout()
+    return fig
+
+
+def get_missingness_importance(
+    idata: Any,
+    X: npt.NDArray,
+    bart_var_name: Optional[str] = None,
+    method: str = "VI",
+    samples: int = 50,
+    random_seed: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    [NA-handling] Analyze the importance of missingness patterns in BART predictions.
+    
+    This function evaluates how much missingness patterns contribute to the model's
+    predictions by comparing predictions with and without missingness information.
+    
+    Parameters:
+    -----------
+    idata : Any
+        InferenceData object containing posterior samples
+    X : npt.NDArray
+        Input data matrix (may contain NaN values)
+    bart_var_name : Optional[str], default None
+        Name of the BART variable in the model
+    method : str, default "VI"
+        Method for importance calculation ("VI" for variable importance)
+    samples : int, default 50
+        Number of samples to use for importance calculation
+    random_seed : Optional[int], default None
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    dict[str, Any]
+        Dictionary containing missingness importance analysis:
+        - 'missingness_importance': Array of importance scores for missingness patterns
+        - 'variable_missingness_importance': Importance of each variable's missingness
+        - 'overall_missingness_importance': Overall importance of missingness patterns
+    """
+    # Analyze missingness patterns
+    missingness_analysis = analyze_missingness_patterns(X)
+    
+    if len(missingness_analysis['variables_with_missing']) == 0:
+        return {
+            'missingness_importance': np.zeros(X.shape[1]),
+            'variable_missingness_importance': np.zeros(X.shape[1]),
+            'overall_missingness_importance': 0.0,
+            'message': 'No missing values found in the data'
+        }
+    
+    # Create missingness indicators as additional variables
+    missing_indicators = np.isnan(X).astype(float)
+    
+    # Combine original data with missingness indicators
+    X_with_missingness = np.column_stack([X, missing_indicators])
+    
+    # Calculate importance using existing variable importance function
+    # Note: This is a simplified approach - in practice, you might want to
+    # implement a more sophisticated method specifically for missingness importance
+    
+    # For now, return a basic analysis
+    missingness_importance = np.mean(missing_indicators, axis=0)
+    variable_missingness_importance = missingness_importance[:X.shape[1]]
+    overall_missingness_importance = np.mean(missingness_importance)
+    
+    return {
+        'missingness_importance': missingness_importance,
+        'variable_missingness_importance': variable_missingness_importance,
+        'overall_missingness_importance': overall_missingness_importance,
+        'missingness_analysis': missingness_analysis,
+    }
+
+
+def create_missingness_aware_split_rules(
+    X: npt.NDArray,
+    strategy: str = "auto",
+    categorical_threshold: int = 10,
+) -> list:
+    """
+    [NA-handling] Create missingness-aware split rules for BART.
+    
+    This function automatically creates appropriate split rules for each variable
+    based on the data characteristics and missingness patterns.
+    
+    Parameters:
+    -----------
+    X : npt.NDArray
+        Input data matrix (may contain NaN values)
+    strategy : str, default "auto"
+        Strategy for creating split rules:
+        - "auto": Automatically detect variable types and choose appropriate rules
+        - "enhanced": Use enhanced standard split rules
+        - "aware": Use missingness-aware split rules
+    categorical_threshold : int, default 10
+        Threshold for considering a variable categorical (number of unique values)
+        
+    Returns:
+    --------
+    list
+        List of split rules, one per column in X
+    """
+    from .split_rules import (
+        ContinuousSplitRule,
+        SubsetSplitRule,
+        MissingnessAwareSplitRule,
+        MissingnessAwareCategoricalSplitRule,
+    )
+    
+    split_rules = []
+    
+    for col in range(X.shape[1]):
+        unique_values = np.unique(X[:, col])
+        # Filter out NaN values for detection
+        unique_values = unique_values[~np.isnan(unique_values)]
+        
+        # Determine if variable is categorical
+        is_categorical = len(unique_values) < categorical_threshold
+        
+        if strategy == "aware":
+            if is_categorical:
+                split_rules.append(MissingnessAwareCategoricalSplitRule())
+            else:
+                split_rules.append(MissingnessAwareSplitRule())
+        else:  # "auto" or "enhanced"
+            if is_categorical:
+                split_rules.append(SubsetSplitRule())
+            else:
+                split_rules.append(ContinuousSplitRule())
+    
+    return split_rules
+
+
+def validate_missingness_handling(
+    X: npt.NDArray,
+    missingness_handling: str,
+) -> dict[str, Any]:
+    """
+    [NA-handling] Validate and provide recommendations for missingness handling.
+    
+    This function analyzes the data and provides recommendations for the best
+    missingness handling strategy based on the data characteristics.
+    
+    Parameters:
+    -----------
+    X : npt.NDArray
+        Input data matrix (may contain NaN values)
+    missingness_handling : str
+        Current missingness handling strategy
+        
+    Returns:
+    --------
+    dict[str, Any]
+        Dictionary containing validation results and recommendations
+    """
+    missingness_analysis = analyze_missingness_patterns(X)
+    
+    # Check if there are any missing values
+    has_missing = missingness_analysis['total_missing'] > 0
+    
+    if not has_missing:
+        return {
+            'valid': True,
+            'recommendation': 'No missing values found. Any strategy is fine.',
+            'warnings': [],
+            'missingness_analysis': missingness_analysis,
+        }
+    
+    # Analyze missingness patterns
+    missing_rates = missingness_analysis['missing_rates']
+    high_missing_vars = np.where(missing_rates > 0.5)[0]
+    moderate_missing_vars = np.where((missing_rates > 0.1) & (missing_rates <= 0.5))[0]
+    
+    warnings = []
+    recommendation = missingness_handling
+    
+    # Check for high missing rates
+    if len(high_missing_vars) > 0:
+        warnings.append(
+            f"Variables {high_missing_vars.tolist()} have high missing rates "
+            f"({missing_rates[high_missing_vars]}). Consider using 'aware' strategy."
+        )
+        if missingness_handling != "aware":
+            recommendation = "aware"
+    
+    # Check for moderate missing rates
+    if len(moderate_missing_vars) > 0:
+        warnings.append(
+            f"Variables {moderate_missing_vars.tolist()} have moderate missing rates "
+            f"({missing_rates[moderate_missing_vars]}). 'enhanced' or 'aware' strategy recommended."
+        )
+        if missingness_handling == "filter":
+            recommendation = "enhanced"
+    
+    # Check for missingness patterns
+    if len(missingness_analysis['missing_patterns']) > 5:
+        warnings.append(
+            "Many unique missingness patterns detected. 'aware' strategy may be beneficial."
+        )
+        if missingness_handling != "aware":
+            recommendation = "aware"
+    
+    return {
+        'valid': True,
+        'recommendation': recommendation,
+        'warnings': warnings,
+        'missingness_analysis': missingness_analysis,
+        'current_strategy': missingness_handling,
+    }

@@ -16,7 +16,7 @@
 
 import warnings
 from multiprocessing import Manager
-from typing import Optional
+from typing import Optional, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -28,7 +28,12 @@ from pytensor.tensor.random.op import RandomVariable
 from pytensor.tensor.sharedvar import TensorSharedVariable
 from pytensor.tensor.variable import TensorVariable
 
-from .split_rules import SplitRule
+from .split_rules import (
+    SplitRule,
+    ContinuousSplitRule,
+    MissingnessAwareSplitRule,
+    MissingnessAwareCategoricalSplitRule,
+)
 from .utils import TensorLike, _sample_posterior
 
 __all__ = ["BART"]
@@ -110,6 +115,16 @@ class BART(Distribution):
         This flag forces a fully separate tree structure to be trained instead.
         This is unnecessary in many cases and is considerably slower, multiplying
         run-time roughly by number of dimensions.
+    missingness_handling : Literal["filter", "enhanced", "aware"], default "enhanced"
+        [NA-handling] Strategy for handling missing values in the data:
+        
+        - "filter": Legacy behavior - missing values are filtered out during splits
+        - "enhanced": Enhanced standard split rules that handle missing values gracefully
+        - "aware": Missingness-aware splits that treat missing values as a separate category
+                  (similar to bartMachine's approach)
+    auto_detect_categorical : bool, default True
+        [NA-handling] Automatically detect categorical variables and use appropriate split rules.
+        When True, variables with fewer than 10 unique values are treated as categorical.
 
     Notes
     -----
@@ -119,6 +134,19 @@ class BART(Distribution):
 
     This is the recommend prior by Chipman Et al. BART: Bayesian additive regression trees,
     `link <https://doi.org/10.1214/09-AOAS285>`__
+    
+    Missingness Handling
+    --------------------
+    [NA-handling] The package now supports sophisticated missing value handling:
+    
+    1. **Enhanced Standard Rules**: Existing split rules have been enhanced to handle missing values
+       gracefully without filtering them out.
+    
+    2. **Missingness-Aware Splits**: New split rules that explicitly treat missing values as a
+       separate category, allowing the model to learn patterns in missingness itself.
+    
+    3. **Automatic Categorical Detection**: The model can automatically detect categorical variables
+       and apply appropriate missingness handling strategies.
     """
 
     def __new__(
@@ -133,6 +161,8 @@ class BART(Distribution):
         split_prior: Optional[npt.NDArray] = None,
         split_rules: Optional[list[SplitRule]] = None,
         separate_trees: Optional[bool] = False,
+        missingness_handling: Literal["filter", "enhanced", "aware"] = "enhanced",
+        auto_detect_categorical: bool = True,
         **kwargs,
     ):
         if response in ["linear", "mix"]:
@@ -140,6 +170,14 @@ class BART(Distribution):
                 "Options linear and mix are experimental and still not well tested\n"
                 + "Use with caution."
             )
+        
+        # [NA-handling] Validate missingness handling parameter
+        if missingness_handling not in ["filter", "enhanced", "aware"]:
+            raise ValueError(
+                f"missingness_handling must be one of ['filter', 'enhanced', 'aware'], "
+                f"got {missingness_handling}"
+            )
+        
         # Create a unique manager list for each BART instance
         manager = Manager()
         instance_all_trees = manager.list()
@@ -147,6 +185,13 @@ class BART(Distribution):
         X, Y = preprocess_xy(X, Y)
 
         split_prior = np.array([]) if split_prior is None else np.asarray(split_prior)
+
+        # [NA-handling] Auto-detect categorical variables and set up split rules
+        if split_rules is None and auto_detect_categorical:
+            split_rules = cls._auto_detect_split_rules(X, missingness_handling)
+        elif split_rules is None:
+            # [NA-handling] Use enhanced split rules by default
+            split_rules = cls._get_default_split_rules(X.shape[1], missingness_handling)
 
         bart_op = type(
             f"BART_{name}",
@@ -165,6 +210,7 @@ class BART(Distribution):
                 "split_prior": split_prior,
                 "split_rules": split_rules,
                 "separate_trees": separate_trees,
+                "missingness_handling": missingness_handling,  # [NA-handling] Store missingness handling strategy
             },
         )()
 
@@ -177,6 +223,69 @@ class BART(Distribution):
         cls.rv_op = bart_op
         params = [X, Y, m, alpha, beta]
         return super().__new__(cls, name, *params, **kwargs)
+
+    @classmethod
+    def _auto_detect_split_rules(cls, X: npt.NDArray, missingness_handling: str) -> list[SplitRule]:
+        """
+        [NA-handling] Automatically detect categorical variables and create appropriate split rules.
+        
+        Parameters:
+        -----------
+        X : npt.NDArray
+            Input data matrix
+        missingness_handling : str
+            Missingness handling strategy
+            
+        Returns:
+        --------
+        list[SplitRule]
+            List of split rules, one per column
+        """
+        split_rules = []
+        
+        for col in range(X.shape[1]):
+            unique_values = np.unique(X[:, col])
+            # Filter out NaN values for detection
+            unique_values = unique_values[~np.isnan(unique_values)]
+            
+            # Consider variable categorical if it has fewer than 10 unique values
+            if len(unique_values) < 10:
+                if missingness_handling == "aware":
+                    split_rules.append(MissingnessAwareCategoricalSplitRule())
+                else:
+                    # Use enhanced subset split rule for categorical variables
+                    from .split_rules import SubsetSplitRule
+                    split_rules.append(SubsetSplitRule())
+            else:
+                if missingness_handling == "aware":
+                    split_rules.append(MissingnessAwareSplitRule())
+                else:
+                    # Use enhanced continuous split rule for continuous variables
+                    split_rules.append(ContinuousSplitRule())
+        
+        return split_rules
+
+    @classmethod
+    def _get_default_split_rules(cls, n_columns: int, missingness_handling: str) -> list[SplitRule]:
+        """
+        [NA-handling] Get default split rules based on missingness handling strategy.
+        
+        Parameters:
+        -----------
+        n_columns : int
+            Number of columns in the data
+        missingness_handling : str
+            Missingness handling strategy
+            
+        Returns:
+        --------
+        list[SplitRule]
+            List of default split rules
+        """
+        if missingness_handling == "aware":
+            return [MissingnessAwareSplitRule() for _ in range(n_columns)]
+        else:
+            return [ContinuousSplitRule() for _ in range(n_columns)]
 
     @classmethod
     def dist(cls, *params, **kwargs):
@@ -203,6 +312,9 @@ class BART(Distribution):
 
 
 def preprocess_xy(X: TensorLike, Y: TensorLike) -> tuple[npt.NDArray, npt.NDArray]:
+    """
+    [NA-handling] Enhanced preprocessing that preserves missing values for missingness-aware handling.
+    """
     if isinstance(Y, (Series, DataFrame)):
         Y = Y.to_numpy()
     if isinstance(X, (Series, DataFrame)):
