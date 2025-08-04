@@ -1284,8 +1284,21 @@ def _decode_vi(n: int, length: int) -> list[int]:
 
 
 def _encode_vi(vec: npt.NDArray) -> int:
-    """Encode a binary vector to an integer."""
-    return int("".join(map(str, vec.astype(int))), 2)
+    """
+    Encode a binary vector to an integer.
+    
+    This function converts a binary vector (containing only 0s and 1s) to an integer
+    by treating it as a binary number. If the vector contains non-binary values,
+    it will convert them to binary by thresholding at 0.5.
+    """
+    # Ensure we have a binary vector by thresholding if necessary
+    if not np.all(np.isin(vec, [0, 1])):
+        # Convert to binary by thresholding at 0.5
+        vec = (vec > 0.5).astype(int)
+    
+    # Convert to binary string and then to integer
+    binary_str = "".join(map(str, vec))
+    return int(binary_str, 2)
 
 
 # [NA-handling] Missingness handling utility functions
