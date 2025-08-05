@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import pymc as pm
+import pytensor
 import pytensor.tensor as pt
 from arviz_base import rcParams
 from arviz_stats.base import array_stats
@@ -15,6 +16,8 @@ from numba import jit
 from pytensor.tensor.variable import Variable
 from scipy.interpolate import griddata
 from scipy.signal import savgol_filter
+from pytensor.tensor.sharedvar import TensorSharedVariable
+from pytensor.tensor.variable import TensorVariable
 
 from .tree import Tree
 
@@ -1303,6 +1306,188 @@ def _encode_vi(vec: npt.NDArray) -> int:
 
 # [NA-handling] Missingness handling utility functions
 
+class MutableDataWithNA:
+    """
+    [NA-handling] Enhanced data container that supports missing values and integrates with PyMC's Data system.
+    
+    This class provides a wrapper around numpy arrays that preserves missing values (NaN) and
+    creates PyTensor shared variables that can be updated during sampling. It's designed to
+    work seamlessly with PyMC's pm.Data functionality while supporting the missingness-aware
+    BART implementation.
+    
+    Parameters
+    ----------
+    name : str
+        Name for the data variable
+    value : array-like
+        Input data that may contain missing values (NaN)
+    dtype : numpy dtype, optional
+        Data type for the array. Defaults to float64 to properly handle NaN values.
+    
+    Attributes
+    ----------
+    name : str
+        The name of the data variable
+    tensor : TensorSharedVariable
+        PyTensor shared variable that can be updated during sampling
+    shape : tuple
+        Shape of the data array
+    dtype : numpy dtype
+        Data type of the array
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from pymc_bart.utils import MutableDataWithNA
+    >>> 
+    >>> # Create data with missing values
+    >>> X = np.array([[1.0, 2.0, np.nan], [4.0, np.nan, 6.0], [7.0, 8.0, 9.0]])
+    >>> data_X = MutableDataWithNA("X", X)
+    >>> 
+    >>> # Use in PyMC model
+    >>> import pymc as pm
+    >>> with pm.Model():
+    >>>     pm_data_X = pm.Data("pm_data_X", data_X.tensor)
+    >>>     # ... rest of model definition
+    >>> 
+    >>> # Update data during sampling
+    >>> data_X.set_value(new_X)
+    """
+    
+    def __init__(self, name: str, value, dtype=np.float64):
+        self.name = name
+        
+        # Convert to numpy array and ensure float dtype to handle NaN values
+        if not isinstance(value, np.ndarray):
+            value = np.asarray(value)
+        
+        # Ensure float dtype to properly handle NaN values
+        if not np.issubdtype(value.dtype, np.floating):
+            value = value.astype(dtype)
+        
+        self._value = value
+        self.shape = value.shape
+        self.dtype = value.dtype
+        
+        # Create PyTensor shared variable
+        self.tensor = pt.as_tensor_variable(value, name=name)
+        
+        # Convert to shared variable if it isn't already
+        if not isinstance(self.tensor, TensorSharedVariable):
+            self.tensor = pytensor.shared(value, name=name)
+    
+    def set_value(self, new_value):
+        """
+        Update the data with new values.
+        
+        Parameters
+        ----------
+        new_value : array-like
+            New data values. Must have the same shape as the original data.
+            Missing values should be represented as NaN.
+        
+        Raises
+        ------
+        ValueError
+            If the new value has a different shape than the original data.
+        """
+        new_array = np.asarray(new_value)
+        
+        # Ensure float dtype to handle NaN values
+        if not np.issubdtype(new_array.dtype, np.floating):
+            new_array = new_array.astype(self.dtype)
+        
+        # Check shape compatibility
+        if new_array.shape != self.shape:
+            raise ValueError(
+                f"New value shape {new_array.shape} does not match original shape {self.shape}"
+            )
+        
+        # Update the shared variable
+        if isinstance(self.tensor, TensorSharedVariable):
+            self.tensor.set_value(new_array)
+        else:
+            # If not a shared variable, create a new one
+            self.tensor = pytensor.shared(new_array, name=self.name)
+        
+        # Update internal value
+        self._value = new_array
+    
+    def get_value(self):
+        """
+        Get the current data values.
+        
+        Returns
+        -------
+        numpy.ndarray
+            Current data values
+        """
+        if isinstance(self.tensor, TensorSharedVariable):
+            return self.tensor.get_value()
+        else:
+            return self._value
+    
+    def __array__(self, dtype=None, copy=None):
+        """Support for numpy array conversion."""
+        arr = self.get_value()
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        if copy is not None and copy:
+            arr = arr.copy()
+        return arr
+    
+    def __getitem__(self, key):
+        """Support for array indexing."""
+        return self.get_value()[key]
+    
+    def __setitem__(self, key, value):
+        """Support for array assignment."""
+        current_value = self.get_value().copy()
+        current_value[key] = value
+        self.set_value(current_value)
+    
+    def __len__(self):
+        """Support for len() function."""
+        return len(self.get_value())
+    
+    def __repr__(self):
+        """String representation."""
+        return f"MutableDataWithNA(name='{self.name}', shape={self.shape}, dtype={self.dtype})"
+    
+    def __str__(self):
+        """String representation."""
+        return self.__repr__()
+
+
+def create_mutable_data_with_na(name: str, value, dtype=np.float64):
+    """
+    [NA-handling] Convenience function to create MutableDataWithNA objects.
+    
+    Parameters
+    ----------
+    name : str
+        Name for the data variable
+    value : array-like
+        Input data that may contain missing values (NaN)
+    dtype : numpy dtype, optional
+        Data type for the array. Defaults to float64 to properly handle NaN values.
+    
+    Returns
+    -------
+    MutableDataWithNA
+        A mutable data container that supports missing values
+    
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from pymc_bart.utils import create_mutable_data_with_na
+    >>> 
+    >>> X = np.array([[1.0, 2.0, np.nan], [4.0, np.nan, 6.0]])
+    >>> data_X = create_mutable_data_with_na("X", X)
+    """
+    return MutableDataWithNA(name, value, dtype)
+
+
 def analyze_missingness_patterns(X: npt.NDArray) -> dict[str, Any]:
     """
     [NA-handling] Analyze missingness patterns in the input data.
@@ -1634,3 +1819,26 @@ def validate_missingness_handling(
         'missingness_analysis': missingness_analysis,
         'current_strategy': missingness_handling,
     }
+
+
+__all__ = [
+    "_sample_posterior",
+    "plot_convergence",
+    "plot_ice",
+    "plot_pdp",
+    "get_variable_inclusion",
+    "plot_variable_inclusion",
+    "compute_variable_importance",
+    "plot_variable_importance",
+    "plot_scatter_submodels",
+    "pearsonr2",
+    "_decode_vi",
+    "_encode_vi",
+    "MutableDataWithNA",
+    "create_mutable_data_with_na",
+    "analyze_missingness_patterns",
+    "plot_missingness_patterns",
+    "get_missingness_importance",
+    "create_missingness_aware_split_rules",
+    "validate_missingness_handling",
+]
