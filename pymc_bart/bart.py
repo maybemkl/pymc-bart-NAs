@@ -73,7 +73,8 @@ class BARTRV(RandomVariable):
                 shape = size[0]
             else:
                 shape = 1
-            return _sample_posterior(cls.all_trees, cls.X, rng=rng, shape=shape).squeeze().T
+            # Use current X passed at call time for prediction
+            return _sample_posterior(cls.all_trees, X, rng=rng, shape=shape).squeeze().T
 
 
 bart = BARTRV()
@@ -289,7 +290,11 @@ class BART(Distribution):
 
     @classmethod
     def dist(cls, *params, **kwargs):
-        return super().dist(params, **kwargs)
+        # Be compatible with PyMC versions that expect either unpacked or packed params
+        try:
+            return super().dist(*params, **kwargs)
+        except TypeError:
+            return super().dist(params, **kwargs)
 
     def logp(self, x, *inputs):
         """Calculate log probability.

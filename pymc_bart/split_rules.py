@@ -200,7 +200,12 @@ class MissingnessAwareSplitRule(SplitRule):
         Returns:
         - Boolean array indicating which values go to the left child
         """
-        split_value, missing_goes_left = split_info
+        # Robust to scalar split_info stored during training
+        if isinstance(split_info, tuple):
+            split_value, missing_goes_left = split_info
+        else:
+            split_value = split_info
+            missing_goes_left = True
         
         # Handle case where split_value is None (no valid split found)
         if split_value is None:
@@ -275,7 +280,12 @@ class MissingnessAwareCategoricalSplitRule(SplitRule):
         Returns:
         - Boolean array indicating which values go to the left child
         """
-        category_subset, missing_goes_left = split_info
+        # Robust to scalar split_info stored during training
+        if isinstance(split_info, tuple):
+            category_subset, missing_goes_left = split_info
+        else:
+            category_subset = np.array([split_info]) if split_info is not None else None
+            missing_goes_left = True
         
         # Handle case where category_subset is None (no valid split found)
         if category_subset is None:

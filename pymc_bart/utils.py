@@ -1376,7 +1376,7 @@ class MutableDataWithNA:
         if not isinstance(self.tensor, TensorSharedVariable):
             self.tensor = pytensor.shared(value, name=name)
     
-    def set_value(self, new_value):
+    def set_value(self, new_value, allow_shape_change: bool = False):
         """
         Update the data with new values.
         
@@ -1397,14 +1397,18 @@ class MutableDataWithNA:
         if not np.issubdtype(new_array.dtype, np.floating):
             new_array = new_array.astype(self.dtype)
         
-        # Check shape compatibility
+        # Check shape compatibility (optionally allow shape change)
         if new_array.shape != self.shape:
-            raise ValueError(
-                f"New value shape {new_array.shape} does not match original shape {self.shape}"
-            )
+            if not allow_shape_change:
+                raise ValueError(
+                    f"New value shape {new_array.shape} does not match original shape {self.shape}"
+                )
+            # Opt-in shape update
+            self.shape = new_array.shape
         
         # Update the shared variable
         if isinstance(self.tensor, TensorSharedVariable):
+            # PyTensor shared variables support updating with different shapes
             self.tensor.set_value(new_array)
         else:
             # If not a shared variable, create a new one
