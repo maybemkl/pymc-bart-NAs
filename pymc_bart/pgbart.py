@@ -138,7 +138,6 @@ class PGBART(ArrayStepShared):
         **kwargs,  # Accept additional kwargs for compound sampling
     ) -> None:
         model = modelcontext(model)
-        user_vars_param = vars
         if initial_point is None:
             initial_point = model.initial_point()
         if vars is None:
@@ -150,37 +149,12 @@ class PGBART(ArrayStepShared):
         if vars is None:
             raise ValueError("Unable to find variables to sample")
 
-        # Filter to only BART variables (value vars)
+        # Filter to only BART variables
         bart_vars = []
-        def _is_bart_op(op) -> bool:
-            # Robust check across reloads/dynamic subclasses
-            try:
-                return any(cls.__name__ == "BARTRV" for cls in op.__class__.__mro__)
-            except Exception:
-                return False
-
-        # Attempt 1: Convert value vars to RVs via mapping
-        for val in vars:
-            rv = model.values_to_rvs.get(val, None)
-            if rv is not None and _is_bart_op(getattr(getattr(rv, "owner", None), "op", None)):
-                bart_vars.append(val)
-
-        # Attempt 2: Scan all RVs in model
-        if not bart_vars:
-            for rv, val in model.rvs_to_values.items():
-                if _is_bart_op(getattr(getattr(rv, "owner", None), "op", None)):
-                    bart_vars.append(val)
-                    break
-
-        # Attempt 3: Use user-passed μ directly, then map to value var
-        if not bart_vars and user_vars_param is not None:
-            for uvar in user_vars_param:
-                op = getattr(getattr(uvar, "owner", None), "op", None)
-                if op is not None and _is_bart_op(op):
-                    val = model.rvs_to_values.get(uvar, None)
-                    if val is not None:
-                        bart_vars.append(val)
-                        break
+        for var in vars:
+            rv = model.values_to_rvs.get(var)
+            if rv is not None and isinstance(rv.owner.op, BARTRV):
+                bart_vars.append(var)
 
         if not bart_vars:
             raise ValueError("No BART variables found in the provided variables")
@@ -872,7 +846,6 @@ def logp(
         containing :class:`pytensor.tensor.Tensor` for depended shared data
     """
     out_list, inarray0 = join_nonshared_inputs(point, out_vars, vars, shared)
-    # Some graphs may not reference the joined input explicitly; ignore unused input errors
-    function = pytensor_function([inarray0], out_list[0], on_unused_input="ignore")
+    function = pytensor_function([inarray0], out_list[0])
     function.trust_input = True
     return function
