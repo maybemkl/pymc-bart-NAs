@@ -36,6 +36,9 @@ from .split_rules import (
 )
 from .utils import TensorLike, _sample_posterior
 
+# Global registry for storing BART trees across BART Op replacements
+_bart_trees_registry = {}
+
 __all__ = ["BART"]
 
 
@@ -58,7 +61,18 @@ class BARTRV(RandomVariable):
         if not size:
             size = None
 
-        if not hasattr(cls, "all_trees") or not cls.all_trees:
+        # Only try to get trees from BART Op (not from file during model initialization)
+        all_trees = []
+        if hasattr(cls, 'all_trees') and cls.all_trees:
+            all_trees = cls.all_trees
+            print(f"DEBUG: rng_fn - found trees in BART Op, length: {len(all_trees)}")
+        else:
+            # During model initialization, don't load from file - just return mean
+            print(f"DEBUG: rng_fn - no trees in BART Op, returning mean (model initialization)")
+        
+        # print(f"DEBUG: rng_fn bart object id: {id(cls)}")
+        
+        if len(all_trees) == 0:
             if isinstance(cls.Y, (TensorSharedVariable, TensorVariable)):
                 Y = cls.Y.eval()
             else:
@@ -73,8 +87,16 @@ class BARTRV(RandomVariable):
                 shape = size[0]
             else:
                 shape = 1
-            # Use current X passed at call time for prediction
-            return _sample_posterior(cls.all_trees, X, rng=rng, shape=shape).squeeze().T
+            
+            # Use current X value (from shared variable if applicable) for prediction
+            # This ensures predictions use updated data from set_value() calls
+            if isinstance(cls.X, (TensorSharedVariable, TensorVariable)):
+                current_X = cls.X.eval()
+            else:
+                current_X = cls.X
+            
+            result = _sample_posterior(all_trees, current_X, rng=rng, shape=shape).squeeze().T
+            return result
 
 
 bart = BARTRV()
@@ -179,9 +201,8 @@ class BART(Distribution):
                 f"got {missingness_handling}"
             )
         
-        # Create a unique manager list for each BART instance
-        manager = Manager()
-        instance_all_trees = manager.list()
+        # Create a regular list for each BART instance (no multiprocessing)
+        instance_all_trees = []
 
         X, Y = preprocess_xy(X, Y)
 
@@ -199,7 +220,7 @@ class BART(Distribution):
             (BARTRV,),
             {
                 "name": "BART",
-                "all_trees": instance_all_trees,  # Instance-specific tree storage
+                "all_trees": [],  # Use empty list initially
                 "inplace": False,
                 "initval": Y.mean(),
                 "X": X,
@@ -214,6 +235,9 @@ class BART(Distribution):
                 "missingness_handling": missingness_handling,  # [NA-handling] Store missingness handling strategy
             },
         )()
+        
+        # Set the all_trees reference after creation
+        bart_op.all_trees = instance_all_trees
 
         Distribution.register(BARTRV)
 

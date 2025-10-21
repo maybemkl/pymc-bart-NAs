@@ -168,6 +168,11 @@ class PGBART(ArrayStepShared):
 
         value_bart = bart_vars[0]
         self.bart = model.values_to_rvs[value_bart].owner.op
+        
+        # Ensure we're using the same all_trees reference as the BART Op
+        if not hasattr(self.bart, 'all_trees') or not self.bart.all_trees:
+            # If the BART Op doesn't have all_trees, create a new one
+            self.bart.all_trees = []
 
         if isinstance(self.bart.X, Variable):
             self.X = self.bart.X.eval()
@@ -337,8 +342,42 @@ class PGBART(ArrayStepShared):
                     for index in new_tree.get_split_variables():
                         variable_inclusion[index] += 1
 
-        if not self.tune:
-            self.bart.all_trees.append(self.all_trees)
+        # Store trees in the BART Op for immediate access
+        if not hasattr(self.bart, 'all_trees') or not self.bart.all_trees:
+            self.bart.all_trees = []
+        self.bart.all_trees.append(self.all_trees)
+        
+        # Store trees in a file for persistence across processes
+        try:
+            import cloudpickle as cpkl
+            import os
+            bart_name = getattr(self.bart, 'name', 'BART')
+            trees_key = f"{bart_name}_trees"
+            trees_file = f"bart_trees_{trees_key}.pkl"
+            
+            # Load existing trees
+            if os.path.exists(trees_file):
+                try:
+                    with open(trees_file, 'rb') as f:
+                        all_trees_list = cpkl.load(f)
+                except (EOFError, Exception):
+                    all_trees_list = []
+            else:
+                all_trees_list = []
+            
+            # Append new trees directly
+            all_trees_list.append(self.all_trees)
+            
+            # Save back to file
+            with open(trees_file, 'wb') as f:
+                cpkl.dump(all_trees_list, f)
+            
+            print(f"DEBUG: PGBART stored in file - key: {trees_key}, file: {trees_file}, length: {len(all_trees_list)}")
+            print(f"DEBUG: PGBART stored tree type: {type(self.all_trees[0][0]) if len(self.all_trees) > 0 and len(self.all_trees[0]) > 0 else 'empty'}")
+        except Exception as e:
+            print(f"DEBUG: PGBART error storing in file: {e}")
+        
+        print(f"DEBUG: PGBART storing trees - tune: {self.tune}, bart.all_trees length: {len(self.bart.all_trees)}, bart ID: {id(self.bart)}")
 
         variable_inclusion = _encode_vi(variable_inclusion)
 

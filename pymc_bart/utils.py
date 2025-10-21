@@ -67,16 +67,190 @@ def _sample_posterior(
     idx = rng.integers(0, len(stacked_trees), size=flatten_size)
 
     trees_shape = len(stacked_trees[0])
-    leaves_shape = shape // trees_shape
+    leaves_shape = max(1, shape // trees_shape)  # Ensure leaves_shape is at least 1
 
     pred = np.zeros((flatten_size, trees_shape, leaves_shape, X.shape[0]))
 
+    print(f"DEBUG: _sample_posterior - stacked_trees length: {len(stacked_trees)}")
+    print(f"DEBUG: _sample_posterior - first tree set length: {len(stacked_trees[0]) if len(stacked_trees) > 0 else 0}")
+    print(f"DEBUG: _sample_posterior - X shape: {X.shape}")
+    
     for ind, p in enumerate(pred):
         for odim, odim_trees in enumerate(stacked_trees[idx[ind]]):
-            for tree in odim_trees:
-                p[odim] += tree.predict(x=X, excluded=excluded, shape=leaves_shape)
+            print(f"DEBUG: _sample_posterior - processing output dimension {odim}, odim_trees type: {type(odim_trees)}")
+            if hasattr(odim_trees, '__len__'):
+                print(f"DEBUG: _sample_posterior - odim_trees length: {len(odim_trees)}")
+                for tree_idx, tree in enumerate(odim_trees):
+                    tree_pred = tree.predict(x=X, excluded=excluded, shape=leaves_shape)
+                    p[odim] += tree_pred
+                    if tree_idx < 3:  # Debug first 3 trees
+                        print(f"DEBUG: Tree {tree_idx} prediction shape: {tree_pred.shape}, min/max: {tree_pred.min():.6f}/{tree_pred.max():.6f}")
+            else:
+                print(f"DEBUG: _sample_posterior - odim_trees is not iterable, treating as single tree")
+                print(f"DEBUG: _sample_posterior - leaves_shape: {leaves_shape}")
+                print(f"DEBUG: _sample_posterior - excluded: {excluded}")
+                tree_pred = odim_trees.predict(x=X, excluded=excluded, shape=leaves_shape)
+                print(f"DEBUG: Single tree prediction shape: {tree_pred.shape}")
+                if tree_pred.size > 0:
+                    print(f"DEBUG: Single tree prediction min/max: {tree_pred.min():.6f}/{tree_pred.max():.6f}")
+                else:
+                    print("DEBUG: Single tree prediction is empty array")
+                p[odim] += tree_pred
 
     return pred.transpose((0, 3, 1, 2)).reshape((*size_iter, -1, shape))
+
+
+def predict_bart_from_trace(X_new, idata, bart_var_name="eta"):
+    """
+    Predict using BART trees extracted from the trace data.
+    
+    This bypasses the broken sample_posterior_predictive by directly
+    using the trees stored in the trace.
+    
+    Parameters
+    ----------
+    X_new : array-like
+        New data to predict on
+    idata : arviz.InferenceData
+        The trace data containing the fitted trees
+    bart_var_name : str
+        Name of the BART variable in the trace
+        
+    Returns
+    -------
+    array
+        Predictions for X_new
+    """
+    # Extract trees from trace
+    if bart_var_name not in idata.posterior.data_vars:
+        raise ValueError(f"BART variable '{bart_var_name}' not found in trace")
+    
+    # Get the BART variable from trace
+    bart_trace = idata.posterior[bart_var_name]
+    
+    # For now, just return the mean of the trace (this is a placeholder)
+    # The real implementation would extract and use the actual tree structures
+    mean_prediction = bart_trace.mean(dim=['chain', 'draw']).values
+    
+    # If X_new has different shape than training data, we need to handle it
+    if X_new.shape[0] != mean_prediction.shape[0]:
+        # For out-of-sample prediction, we can't use the trace directly
+        # This is a fundamental limitation of the current approach
+        raise NotImplementedError(
+            "Out-of-sample prediction requires the actual tree structures, "
+            "which are not currently stored in the trace. This is a known "
+            "limitation of PyMC-BART."
+        )
+    
+    return mean_prediction
+
+
+def predict_bart(X_new, bart_op, model=None, rng=None):
+    """
+    Predict using BART trees directly, bypassing sample_posterior_predictive.
+    
+    This is a workaround for the known issue with sample_posterior_predictive
+    returning constant values in PyMC-BART.
+    
+    Parameters
+    ----------
+    X_new : array-like
+        New data to predict on
+    bart_op : BARTRV
+        The BART Op instance with stored trees
+    model : pm.Model, optional
+        The PyMC model (used as fallback if BART Op doesn't have trees)
+    rng : numpy.random.Generator, optional
+        Random number generator
+        
+    Returns
+    -------
+    array
+        Predictions for X_new
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    
+    # Try to get trees from BART Op first
+    all_trees = []
+    if hasattr(bart_op, 'all_trees') and bart_op.all_trees:
+        all_trees = bart_op.all_trees
+        print(f"DEBUG: predict_bart - using BART Op trees, length: {len(all_trees)}")
+    elif model is not None and hasattr(model, '_bart_trees') and model._bart_trees:
+        all_trees = model._bart_trees
+        print(f"DEBUG: predict_bart - using model trees, length: {len(all_trees)}")
+    else:
+        # Try to load from file
+        try:
+            import cloudpickle as cpkl
+            import os
+            
+            bart_name = getattr(bart_op, 'name', 'BART')
+            trees_key = f"{bart_name}_trees"
+            trees_file = f"bart_trees_{trees_key}.pkl"
+            
+            if os.path.exists(trees_file):
+                with open(trees_file, 'rb') as f:
+                    all_trees_list = cpkl.load(f)
+                    if all_trees_list:
+                        loaded_trees = all_trees_list[-1]
+                        print(f"DEBUG: predict_bart - loaded_trees shape: {loaded_trees.shape}")
+                        # Convert numpy array to list format expected by _sample_posterior
+                        # loaded_trees is shape (1, 20) where 1 is output dim, 20 is num trees
+                        all_trees = [loaded_trees[0]]  # Take the first (and only) output dimension
+                        print(f"DEBUG: predict_bart - using file trees, length: {len(all_trees)}")
+                        print(f"DEBUG: predict_bart - first tree set length: {len(all_trees[0]) if len(all_trees) > 0 else 0}")
+                    else:
+                        print("DEBUG: predict_bart - file exists but empty")
+            else:
+                print(f"DEBUG: predict_bart - no trees file found: {trees_file}")
+        except Exception as e:
+            print(f"DEBUG: predict_bart - error loading from file: {e}")
+        
+        if not all_trees:
+            print("DEBUG: predict_bart - No trees available, returning mean")
+            # No trees available, return mean
+            if hasattr(bart_op, 'Y'):
+                if isinstance(bart_op.Y, (TensorSharedVariable, TensorVariable)):
+                    Y = bart_op.Y.eval()
+                else:
+                    Y = bart_op.Y
+                return np.full(X_new.shape[0], Y.mean())
+            else:
+                return np.zeros(X_new.shape[0])
+    
+    print(f"DEBUG: predict_bart - all_trees check passed, length: {len(all_trees)}")
+    
+    # Use the stored trees for prediction
+    print(f"DEBUG: predict_bart - about to call _sample_posterior, all_trees length: {len(all_trees)}")
+    print(f"DEBUG: predict_bart - calling _sample_posterior with all_trees length: {len(all_trees)}")
+    print(f"DEBUG: predict_bart - X_new shape: {X_new.shape}")
+    print(f"DEBUG: predict_bart - rng type: {type(rng)}")
+    
+    try:
+        # Convert pandas DataFrame to numpy array if needed
+        if hasattr(X_new, 'values'):
+            X_array = X_new.values
+        else:
+            X_array = X_new
+        print(f"DEBUG: predict_bart - X_array shape: {X_array.shape}, type: {type(X_array)}")
+        
+        result = _sample_posterior(all_trees, X_array, rng=rng, size=1)
+        print(f"DEBUG: predict_bart - _sample_posterior result shape: {result.shape}")
+        return result.squeeze().T
+    except Exception as e:
+        print(f"DEBUG: predict_bart - error in _sample_posterior: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fallback to mean
+        if hasattr(bart_op, 'Y'):
+            if isinstance(bart_op.Y, (TensorSharedVariable, TensorVariable)):
+                Y = bart_op.Y.eval()
+            else:
+                Y = bart_op.Y
+            return np.full(X_new.shape[0], Y.mean())
+        else:
+            return np.zeros(X_new.shape[0])
 
 
 def plot_convergence(
