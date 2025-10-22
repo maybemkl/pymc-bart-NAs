@@ -61,16 +61,28 @@ class BARTRV(RandomVariable):
         if not size:
             size = None
 
-        # Only try to get trees from BART Op (not from file during model initialization)
+        # Try to get trees from BART Op first
         all_trees = []
         if hasattr(cls, 'all_trees') and cls.all_trees:
             all_trees = cls.all_trees
             print(f"DEBUG: rng_fn - found trees in BART Op, length: {len(all_trees)}")
         else:
-            # During model initialization, don't load from file - just return mean
-            print(f"DEBUG: rng_fn - no trees in BART Op, returning mean (model initialization)")
-        
-        # print(f"DEBUG: rng_fn bart object id: {id(cls)}")
+            # If no trees in BART Op, try to load from pickle file
+            trees_key = f"BART_trees"
+            pickle_file = f"bart_trees_{trees_key}.pkl"
+            try:
+                import cloudpickle as cpkl
+                with open(pickle_file, 'rb') as f:
+                    loaded_trees = cpkl.load(f)
+                print(f"DEBUG: rng_fn - loaded from file, type: {type(loaded_trees)}, length: {len(loaded_trees)}")
+                # loaded_trees is now a list of tree sets (one per output dimension)
+                # _sample_posterior expects a list of tree sets, so wrap it
+                all_trees = [loaded_trees]
+                print(f"DEBUG: rng_fn - using all_trees length: {len(all_trees)}")
+            except Exception as e:
+                print(f"DEBUG: rng_fn - failed to load from file: {e}")
+                # During model initialization, return mean if no trees available
+                print(f"DEBUG: rng_fn - returning mean (no trees available)")
         
         if len(all_trees) == 0:
             if isinstance(cls.Y, (TensorSharedVariable, TensorVariable)):

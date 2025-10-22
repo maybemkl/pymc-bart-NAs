@@ -365,8 +365,10 @@ class PGBART(ArrayStepShared):
             else:
                 all_trees_list = []
             
-            # Append new trees directly
-            all_trees_list.append(self.all_trees)
+            # Convert numpy array to list of tree sets as expected by _sample_posterior
+            # self.all_trees is shape (output_dims, num_trees), we want [trees[0], trees[1], ...]
+            tree_sets = [self.all_trees[odim].tolist() for odim in range(self.all_trees.shape[0])]
+            all_trees_list.append(tree_sets)
             
             # Save back to file
             with open(trees_file, 'wb') as f:

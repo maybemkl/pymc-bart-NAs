@@ -78,7 +78,7 @@ def _sample_posterior(
     for ind, p in enumerate(pred):
         for odim, odim_trees in enumerate(stacked_trees[idx[ind]]):
             print(f"DEBUG: _sample_posterior - processing output dimension {odim}, odim_trees type: {type(odim_trees)}")
-            if hasattr(odim_trees, '__len__'):
+            if hasattr(odim_trees, '__len__') and not isinstance(odim_trees, str):
                 print(f"DEBUG: _sample_posterior - odim_trees length: {len(odim_trees)}")
                 for tree_idx, tree in enumerate(odim_trees):
                     tree_pred = tree.predict(x=X, excluded=excluded, shape=leaves_shape)
@@ -193,11 +193,11 @@ def predict_bart(X_new, bart_op, model=None, rng=None):
                 with open(trees_file, 'rb') as f:
                     all_trees_list = cpkl.load(f)
                     if all_trees_list:
-                        loaded_trees = all_trees_list[-1]
-                        print(f"DEBUG: predict_bart - loaded_trees shape: {loaded_trees.shape}")
-                        # Convert numpy array to list format expected by _sample_posterior
-                        # loaded_trees is shape (1, 20) where 1 is output dim, 20 is num trees
-                        all_trees = [loaded_trees[0]]  # Take the first (and only) output dimension
+                        loaded_trees = all_trees_list[-1]  # Get the most recent tree set
+                        print(f"DEBUG: predict_bart - loaded_trees type: {type(loaded_trees)}, length: {len(loaded_trees)}")
+                        # loaded_trees is now a list of tree sets (one per output dimension)
+                        # _sample_posterior expects a list of tree sets, so wrap it
+                        all_trees = [loaded_trees]
                         print(f"DEBUG: predict_bart - using file trees, length: {len(all_trees)}")
                         print(f"DEBUG: predict_bart - first tree set length: {len(all_trees[0]) if len(all_trees) > 0 else 0}")
                     else:
